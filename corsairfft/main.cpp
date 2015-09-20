@@ -14,28 +14,45 @@
 
 #include "kiss_fft.h"
 
+// Output
 #define BARS 16
-#define SAMPLES_PER_BAR 16
+#define BAR_VOLUME_SCALE 0.5f
+#define BAR_VOLUME_THRESHOLD 0.2f
+
+// Sampling
+#define SAMPLES_PER_BAR 32
+#define INPUT_DEVICE 1
+
 #define INP_BUFFER_SIZE (BARS * SAMPLES_PER_BAR)
 #define SAMPLE_RATE (20 * INP_BUFFER_SIZE)
 
+// Window
+#define WBARSIZE 16
+#define WWIDTH (BARS * WBARSIZE)
+#define WHEIGHT 128
+
+// Config
+static unsigned char g_ColorBackground[] = { 0, 0, 0 };
+static unsigned char g_ColorLow[] = { 0, 64, 255 };
+static unsigned char g_ColorHigh[] = { 255, 0, 0 };
+
+
 HWND hwnd;
 static HWAVEIN      hWaveIn;
-static BOOL         bRecording, bPlaying, bEnding;
-static DWORD        dwDataLength, dwRepetitions = 1;
+static bool bTerminating;
+static BOOL         bRecording;
 static HWAVEOUT     hWaveOut;
-static PBYTE        pBuffer1, pBuffer2, pSaveBuffer, pNewBuffer;
+static PBYTE        pBuffer1, pBuffer2;
 static PWAVEHDR     pWaveHdr1, pWaveHdr2;
-static TCHAR        szOpenError [] = TEXT("Error opening waveform audio!");
-static TCHAR        szMemError [] = TEXT("Error allocating memory!");
 static WAVEFORMATEX waveform;
-
 
 float bars[BARS];
 float magnitude[INP_BUFFER_SIZE];
 float phase[INP_BUFFER_SIZE];
 float power[INP_BUFFER_SIZE];
-float masterVolume;
+kiss_fft_cfg cfg;
+
+LRESULT CALLBACK WindowProcedure(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
 
 CorsairLedPositions *fullleds;
 
@@ -48,18 +65,9 @@ LedShortcut *leds;
 int g_NumLeds;
 float kx0, ky0, kx1, ky1, kw, kh;
 
-LRESULT CALLBACK WindowProcedure(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
-
-//void CALLBACK waveInProc(
-//   HWAVEIN   hwi,
-//   UINT      uMsg,
-//   DWORD_PTR dwInstance,
-//   DWORD_PTR dwParam1,
-//   DWORD_PTR dwParam2)
-//{
-//	dwParam2 = dwParam1;
-//	return;
-//}
+std::vector<LedShortcut> barLeds[BARS];
+CorsairLedColor *ledColors;
+int g_ColorDelta[3];
 
 const char* toString(CorsairError error)
 {
@@ -87,14 +95,11 @@ bool checkCorsairError()
 		std::stringstream str;
 		str << "Corsair call failed: " << toString(error) << std::endl;
 		OutputDebugStringA(str.str().c_str());
-		//getchar();
 		return true;
 	}
 	return false;
 }
 
-std::vector<LedShortcut> barLeds[BARS];
-CorsairLedColor *ledColors;
 
 bool initCorsair()
 {
@@ -147,6 +152,11 @@ bool initCorsair()
 		barLeds[b].push_back(led);
 	}
 
+	// LED color helper
+	for (int i = 0; i < 3; ++i)
+	{
+		g_ColorDelta[i] = g_ColorHigh[i] - g_ColorLow[i];
+	}
 	return true;
 }
 
@@ -164,21 +174,21 @@ void updateLedFFT()
 		for (auto l : barLeds[i])
 		{
 			float frac = 1.0f - (l.y - ky0) / kh;
-			float s = (bars[i] - 3.0f) / 48.0f;
+			float s = (bars[i] - BAR_VOLUME_THRESHOLD);
 			s = s > 1.0f ? 1.0f : s;
 			ledColors[x].ledId = l.ledId;
 
 			if (frac <= s)
 			{
-				ledColors[x].r = int(64 + 191 * s);
-				ledColors[x].g = int(128 - 128 * s);
-				ledColors[x].b = int(255 - 255 * s);
+				ledColors[x].r = g_ColorLow[0] + int(g_ColorDelta[0] * s); //int(64 + 191 * s);
+				ledColors[x].g = g_ColorLow[1] + int(g_ColorDelta[1] * s); //int(128 - 128 * s);
+				ledColors[x].b = g_ColorLow[2] + int(g_ColorDelta[2] * s); //int(255 - 255 * s);
 			}
 			else
 			{
-				ledColors[x].r = 0;
-				ledColors[x].g = 0;
-				ledColors[x].b = 0;
+				ledColors[x].r = g_ColorBackground[0];
+				ledColors[x].g = g_ColorBackground[0];
+				ledColors[x].b = g_ColorBackground[0];
 			}
 			x++;
 		}
@@ -192,8 +202,6 @@ void startRecord()
 {
 	pWaveHdr1 = reinterpret_cast <PWAVEHDR> (malloc(sizeof(WAVEHDR)));
 	pWaveHdr2 = reinterpret_cast <PWAVEHDR> (malloc(sizeof(WAVEHDR)));
-	// Allocate memory for save buffer
-	pSaveBuffer = reinterpret_cast <PBYTE> (malloc(1));
 
 	waveInReset(hWaveIn);
 	pBuffer1 = reinterpret_cast <PBYTE> (malloc(INP_BUFFER_SIZE));
@@ -215,13 +223,10 @@ void startRecord()
 	waveform.wBitsPerSample = 8;
 	waveform.cbSize = 0;
 
-	int res = waveInOpen(&hWaveIn, 1, &waveform,
+	int res = waveInOpen(&hWaveIn, INPUT_DEVICE, &waveform,
 		(DWORD) hwnd, 0, CALLBACK_WINDOW);
 	if (res)
 	{
-		//free(pBuffer1);
-		//free(pBuffer2);
-
 		std::stringstream error;
 		error << "Opening device failed: ";
 		error << res;
@@ -281,6 +286,8 @@ int WINAPI WinMain(HINSTANCE hThisInstance,
 	/* Use Windows's default colour as the background of the window */
 	wincl.hbrBackground = (HBRUSH) COLOR_BACKGROUND;
 
+	cfg = kiss_fft_alloc(INP_BUFFER_SIZE, 0, 0, 0);
+
 	/* Register the window class, and if it fails quit the program */
 	if (!RegisterClassEx(&wincl))
 		return 0;
@@ -292,8 +299,8 @@ int WINAPI WinMain(HINSTANCE hThisInstance,
 		WS_VISIBLE | WS_SYSMENU, //WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX, /* default window */
 		CW_USEDEFAULT,       /* Windows decides the position */
 		CW_USEDEFAULT,       /* where the window ends up on the screen */
-		300,                 /* The programs width */
-		300,                 /* and height in pixels */
+		WWIDTH,                 /* The programs width */
+		WHEIGHT,                 /* and height in pixels */
 		HWND_DESKTOP,        /* The window is a child-window to desktop */
 		NULL,                /*use class menu */
 		hThisInstance,       /* Program Instance handler */
@@ -320,7 +327,6 @@ int WINAPI WinMain(HINSTANCE hThisInstance,
 	return 0;
 }
 
-bool bTerminating;
 void Shutdown()
 {
 	bTerminating = true;
@@ -334,17 +340,6 @@ void Shutdown()
 	ss << res;
 	ss << "\n";
 	OutputDebugStringA(ss.str().c_str());
-	//MMSYSERR_INVALHANDLE
-
-	//if (bRecording == TRUE)
-	//{
-	//	waveInUnprepareHeader(hWaveIn, pWaveHdr1, sizeof(WAVEHDR));
-	//	waveInUnprepareHeader(hWaveIn, pWaveHdr2, sizeof(WAVEHDR));
-
-	//	free(pBuffer1);
-	//	free(pBuffer2);
-	//}
-
 }
 
 void CleanUp()
@@ -356,6 +351,7 @@ void CleanUp()
 	g_NumLeds = 0;
 
 	delete [] ledColors;
+	kiss_fft_free(cfg);
 }
 
 LRESULT CALLBACK WindowProcedure(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
@@ -365,40 +361,14 @@ LRESULT CALLBACK WindowProcedure(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
 	switch (message)
 	{
 	case MM_WIM_OPEN:
-		//pSaveBuffer = reinterpret_cast <PBYTE>(realloc(pSaveBuffer, 1));
-
 		// Add the buffers
 		waveInAddBuffer(hWaveIn, pWaveHdr1, sizeof(WAVEHDR));
 		waveInAddBuffer(hWaveIn, pWaveHdr2, sizeof(WAVEHDR));
-
-		bEnding = FALSE;
-		dwDataLength = 0;
 		waveInStart(hWaveIn);
 		return TRUE;
 
 	case MM_WIM_DATA:
 	{
-		//pNewBuffer = reinterpret_cast <PBYTE> (realloc (pSaveBuffer, dwDataLength +
-		//                                       ((PWAVEHDR) lParam)->dwBytesRecorded)) ;
-
-		//if (pNewBuffer == NULL)
-		//{
-		//    waveInClose (hWaveIn) ;
-		//    return TRUE;
-		//}
-
-		//pSaveBuffer = pNewBuffer ;
-		//CopyMemory (pSaveBuffer + dwDataLength, ((PWAVEHDR) lParam)->lpData,
-		//            ((PWAVEHDR) lParam)->dwBytesRecorded) ;
-
-		//dwDataLength += ((PWAVEHDR) lParam)->dwBytesRecorded ;
-
-		if (bEnding)
-		{
-			waveInClose(hWaveIn);
-			return TRUE;
-		}
-
 		LPSTR data = ((PWAVEHDR) lParam)->lpData;
 		int length = ((PWAVEHDR) lParam)->dwBytesRecorded;
 
@@ -408,26 +378,15 @@ LRESULT CALLBACK WindowProcedure(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
 			kiss_fft_cpx out[INP_BUFFER_SIZE];
 			for (int i = 0; i < length; ++i)
 			{
-				//left[i] = ((unsigned char) data[i]) / 256.0f;
 				in[i].r = ((unsigned char) data[i]) / 256.0f;
 				in[i].i = 1.0f / in[i].r;
-				//if (left[i] < 0.4f || left[i] > 0.6f){
-				//	std::stringstream ss;
-				//	ss << left[i];
-				//	ss << "\n";
-				//	OutputDebugStringA(ss.str().c_str());
-				//}
 			}
 
 			float avg_power = 0.0f;
-			//fft		myfft;
-			//myfft.powerSpectrum(0, (int) INP_BUFFER_SIZE / 2, left, INP_BUFFER_SIZE, &magnitude[0], &phase[0], &power[0], &avg_power);
 
-			kiss_fft_cfg cfg = kiss_fft_alloc(INP_BUFFER_SIZE, 0, 0, 0);
 
 			kiss_fft(cfg, in, out);
 
-			kiss_fft_free(cfg);
 
 			// Clear bars
 			for (int i = 0; i < BARS; ++i)
@@ -442,50 +401,20 @@ LRESULT CALLBACK WindowProcedure(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
 
 				// Add to bar
 				int b = (i - 1) % 16;
-
 				bars[b] += m;
-				//if (m > 0.1f)
-				//{
-				//	std::stringstream ss;
-				//	ss << m;
-				//	ss << "\n";
-				//	OutputDebugStringA(ss.str().c_str());
-				//}
 			}
 
-			//int j = 10;
-			//for (int j = 1; j < INP_BUFFER_SIZE / 2 - 1; j++) {
-			//freq[index][j] = magnitude[j];
-			//float m = magnitude[j];
-
-			//if (m > 0.1f)
-			//{
-			//	std::stringstream ss;
-			//	ss << m;
-			//	ss << "\n";
-			//	OutputDebugStringA(ss.str().c_str());
-			//}
-			//}
+			// Normalize bars
+			for (int i = 0; i < BARS; ++i)
+			{
+				bars[i] *= BAR_VOLUME_SCALE / SAMPLES_PER_BAR;
+			}
 		}
 
-		//for (int i = 0; i < length; ++i)
-		//{
-		//	char v = data[i];
-		//	float val = v / 128.0f;
-
-		//	std::stringstream str;
-		//	str << val;
-		//	str << "\n";
-		//	OutputDebugStringA(str.str().c_str());
-		//}
-
-		//float fl = avg / float(length);
-		//std::stringstream str;
-		//str << fl;
-		//str << "\n";
-		//OutputDebugStringA(str.str().c_str());
-
+		// Update LEDs
 		updateLedFFT();
+
+		// Refresh UI
 		InvalidateRect(hwnd, 0, FALSE);
 
 		// Send out a new buffer
@@ -498,7 +427,6 @@ LRESULT CALLBACK WindowProcedure(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
 			waveInStop(hWaveIn);
 			waveInClose(hWaveIn);
 		}
-		//OutputDebugStringA("Data\n");
 		return TRUE;
 	}
 
@@ -510,12 +438,8 @@ LRESULT CALLBACK WindowProcedure(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
 
 			free(pBuffer1);
 			free(pBuffer2);
+			bRecording = FALSE;
 		}
-
-		bRecording = FALSE;
-
-		//if (bTerminating)
-		//SendMessage(hwnd, WM_SYSCOMMAND, SC_CLOSE, 0L);
 
 		CleanUp();
 		PostQuitMessage(0);
@@ -531,8 +455,10 @@ LRESULT CALLBACK WindowProcedure(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
 
 			free(pBuffer1);
 			free(pBuffer2);
+			bRecording = FALSE;
 		}
 
+		CleanUp();
 		PostQuitMessage(0);
 		break;
 
@@ -547,32 +473,38 @@ LRESULT CALLBACK WindowProcedure(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
 			rc.top = 0;
 			rc.left = 0;
 			rc.bottom = 128;
-			rc.right = INP_BUFFER_SIZE;
+			rc.right = WWIDTH;
 			FillRect(hDC, &rc, (HBRUSH) (COLOR_MENUTEXT));
 
 			for (int i = 0; i < BARS; ++i)
 			{
-				int p = i * SAMPLES_PER_BAR;
-				rc.left = p;
-				rc.right = p + SAMPLES_PER_BAR;
-				rc.top = long(128 - bars[i]);
-				FillRect(hDC, &rc, (HBRUSH) (COLOR_ACTIVEBORDER));
+				float f = bars[i];
+				if (f > 1.0f)
+				{
+					f = 1.0f;
+				}
 
-				//std::stringstream ss;
-				//ss << i;
-				//ss << " - ";
-				//ss << left[i];
-				//ss << "\n";
-				//OutputDebugStringA(ss.str().c_str());
+				HBRUSH brush = CreateSolidBrush(RGB(
+					g_ColorLow[0] + g_ColorDelta[0] * f,
+					g_ColorLow[1] + g_ColorDelta[1] * f,
+					g_ColorLow[2] + g_ColorDelta[2] * f
+					));
+
+				int p = i * WBARSIZE;
+				rc.left = p;
+				rc.right = p + WBARSIZE;
+				rc.top = long(128 - bars[i] * 128.0f);
+				FillRect(hDC, &rc, brush);
+
+				DeleteObject(brush);
 			}
 		}
-		//DeleteObject(hPen);
 		DeleteDC(hDC);
 		EndPaint(hwnd, &ps);
 	}
 	break;
 
-	default:                      /* for messages that we don't deal with */
+	default:
 		return DefWindowProc(hwnd, message, wParam, lParam);
 	}
 	return 0;
