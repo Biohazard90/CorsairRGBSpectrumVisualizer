@@ -57,7 +57,7 @@
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>WinMM.Lib;kernel32.lib;user32.lib;comdlg32.lib;CUESDK/CUESDK_2013.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>WinMM.Lib;kernel32.lib;user32.lib;comdlg32.lib;comctl32.lib;CUESDK/CUESDK_2013.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
       <Command>copy "$(ProjectDir)CUESDK\CUESDK_2013.dll" "$(TargetDir)CUESDK_2013.dll"</Command>
@@ -79,19 +79,25 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
-      <AdditionalDependencies>WinMM.Lib;kernel32.lib;user32.lib;comdlg32.lib;CUESDK/CUESDK_2013.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>WinMM.Lib;kernel32.lib;user32.lib;comdlg32.lib;comctl32.lib;CUESDK/CUESDK_2013.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
       <Command>copy "$(ProjectDir)CUESDK\CUESDK_2013.dll" "$(TargetDir)CUESDK_2013.dll"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="colorbutton.cpp" />
+    <ClCompile Include="combobox.cpp" />
     <ClCompile Include="kiss_fft.c" />
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="updowncontrol.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="colorbutton.h" />
+    <ClInclude Include="combobox.h" />
     <ClInclude Include="kiss_fft.h" />
     <ClInclude Include="resource.h" />
+    <ClInclude Include="updowncontrol.h" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="corsairfft.rc" />
